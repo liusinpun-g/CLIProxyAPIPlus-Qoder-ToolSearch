@@ -19,6 +19,7 @@ import (
 	qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/responsestools"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -30,13 +31,15 @@ import (
 
 // QoderExecutor executes requests against the Qoder API with COSY authentication
 type QoderExecutor struct {
-	cfg *config.Config
+	cfg               *config.Config
+	toolSearchLimiter *responsestools.Limiter
 }
 
 // NewQoderExecutor creates a new Qoder executor
 func NewQoderExecutor(cfg *config.Config) *QoderExecutor {
 	return &QoderExecutor{
-		cfg: cfg,
+		cfg:               cfg,
+		toolSearchLimiter: responsestools.NewLimiter(responsestools.DefaultLimits()),
 	}
 }
 
@@ -47,6 +50,24 @@ func (e *QoderExecutor) Identifier() string {
 
 // ExecuteStream executes a streaming request against Qoder API
 func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	req, opts, attempt, errPrepare := helps.PrepareQoderToolSearch(req, opts, e.cfg != nil && e.cfg.Qoder.ToolSearch, e.toolSearchLimiter)
+	if errPrepare != nil {
+		return nil, errPrepare
+	}
+	if attempt == nil {
+		return e.executeStream(ctx, authRecord, req, opts)
+	}
+	streamCtx, cancel := context.WithCancel(ctx)
+	result, errStream := e.executeStream(streamCtx, authRecord, req, opts)
+	if errStream != nil {
+		attempt.Close()
+		cancel()
+		return nil, errStream
+	}
+	return helps.RestoreQoderToolSearchStream(streamCtx, cancel, result, attempt), nil
+}
+
+func (e *QoderExecutor) executeStream(ctx context.Context, authRecord *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	// Get token storage from auth record
 	storage, ok := authRecord.Storage.(*qoderauth.QoderTokenStorage)
 	if !ok {
@@ -389,10 +410,6 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 				}
 			}
 		}
-		// Scanner loop exited naturally (EOF). Emit a terminating
-		// "data: [DONE]" / Anthropic message_stop frame so the client
-		// closes the stream cleanly.
-		emitDone(ctx, out, opts.SourceFormat, req.Model, opts.OriginalRequest, payload, &streamParam)
 		// Check for scanner errors
 		if err := scanner.Err(); err != nil {
 			streamErr := fmt.Errorf("scanner error: %w", err)
@@ -400,6 +417,8 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 			out <- cliproxyexecutor.StreamChunk{Err: streamErr}
 			return
 		}
+		// Only complete a clean EOF; a broken connection must not report success.
+		emitDone(ctx, out, opts.SourceFormat, req.Model, opts.OriginalRequest, payload, &streamParam)
 		reporter.EnsurePublished(ctx)
 	}()
 
@@ -567,6 +586,11 @@ func (e *qoderStatusError) StatusCode() int {
 
 // CountTokens estimates token count for the request (placeholder implementation)
 func (e *QoderExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	req, opts, attempt, errPrepare := helps.PrepareQoderToolSearch(req, opts, e.cfg != nil && e.cfg.Qoder.ToolSearch, e.toolSearchLimiter)
+	if errPrepare != nil {
+		return cliproxyexecutor.Response{}, errPrepare
+	}
+	defer attempt.Close()
 	// Translate non-openai formats before extracting messages
 	payload := req.Payload
 	if opts.SourceFormat != "" && opts.SourceFormat != sdktranslator.FormatOpenAI {
@@ -609,6 +633,20 @@ func (e *QoderExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 
 // Execute executes a non-streaming request against Qoder API
 func (e *QoderExecutor) Execute(ctx context.Context, authRecord *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	req, opts, attempt, errPrepare := helps.PrepareQoderToolSearch(req, opts, e.cfg != nil && e.cfg.Qoder.ToolSearch, e.toolSearchLimiter)
+	if errPrepare != nil {
+		return cliproxyexecutor.Response{}, errPrepare
+	}
+	defer attempt.Close()
+	response, errExecute := e.execute(ctx, authRecord, req, opts)
+	if errExecute != nil {
+		return cliproxyexecutor.Response{}, errExecute
+	}
+	response.Payload, errExecute = attempt.RewriteResponse(response.Payload)
+	return response, errExecute
+}
+
+func (e *QoderExecutor) execute(ctx context.Context, authRecord *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	// We need ExecuteStream to:
 	//   1. Translate the request payload from the client's SourceFormat
 	//      (Anthropic/Gemini/etc) into OpenAI before sending to Qoder.
@@ -626,7 +664,7 @@ func (e *QoderExecutor) Execute(ctx context.Context, authRecord *cliproxyauth.Au
 	}
 	internalOpts.SourceFormat = sdktranslator.FormatOpenAI
 
-	streamResult, err := e.ExecuteStream(ctx, authRecord, internalReq, internalOpts)
+	streamResult, err := e.executeStream(ctx, authRecord, internalReq, internalOpts)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}

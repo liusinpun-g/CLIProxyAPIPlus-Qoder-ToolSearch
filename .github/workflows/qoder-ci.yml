@@ -1,0 +1,24 @@
+name: Qoder tool-search CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify imported protocol core
+        run: sha256sum -c internal/responsestools/UPSTREAM.sha256
+      - name: Test affected packages
+        run: go test ./internal/responsestools ./internal/runtime/executor/helps ./internal/runtime/executor ./internal/client/codex/models ./sdk/api/handlers/openai
+      - name: Focused race tests
+        run: go test -race ./internal/responsestools ./internal/runtime/executor/helps ./internal/runtime/executor ./internal/client/codex/models -run 'TestQoderToolSearch|TestPrepare|TestStream' -count=1
+      - name: Build
+        run: go build -o "$RUNNER_TEMP/cli-proxy-api-plus" ./cmd/server

@@ -1,0 +1,43 @@
+name: Qoder tool-search prerelease
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing reviewed tag, e.g. v7.3.12-qoder-tools.1
+        required: true
+        type: string
+permissions:
+  contents: write
+concurrency:
+  group: qoder-prerelease-${{ inputs.tag }}
+  cancel-in-progress: false
+jobs:
+  package:
+    runs-on: macos-14
+    steps:
+      - name: Validate tag name
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: '[[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-qoder-tools\.[1-9][0-9]*$ ]]'
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test affected packages
+        run: go test ./internal/responsestools ./internal/runtime/executor/helps ./internal/runtime/executor ./internal/client/codex/models ./sdk/api/handlers/openai
+      - name: Package reviewed tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: bash scripts/package-qoder-release.sh "$RELEASE_TAG"
+      - name: Create draft prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --draft --prerelease --latest=false --title "Qoder Tool Search $RELEASE_TAG" \
+            --notes-file RELEASE_NOTES.md dist/*.tar.gz dist/checksums.txt

@@ -77,6 +77,9 @@ type SDKConfig struct {
 
 // QoderConfig configures Qoder provider endpoints.
 type QoderConfig struct {
+	// ToolSearch enables the in-process Responses client tool-search bridge.
+	ToolSearch bool `yaml:"tool-search,omitempty" json:"tool-search,omitempty"`
+
 	// VPCEndpoint selects a Qoder CN Enterprise VPC deployment. It accepts either
 	// an instance name or its base, gateway, or OpenAPI domain. Empty keeps the
 	// public global Qoder endpoints.

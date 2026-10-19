@@ -164,6 +164,8 @@ proxy-url: ""
 # Set QODERCN_PERSONAL_ACCESS_TOKEN before running --qoder-login to use PAT authentication.
 # qoder:
 #   vpc-endpoint: "acme.vpc.qoder.com.cn"
+#   # Opt in to in-process Codex client tool discovery on Qoder Responses routes.
+#   tool-search: false
 
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
 force-model-prefix: false
