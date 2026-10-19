@@ -3,9 +3,14 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing reviewed tag, e.g. v7.3.12-qoder-tools.1
+        description: Release tag; a missing tag is created at the selected workflow commit
         required: true
         type: string
+      publish:
+        description: Publish the prerelease after validation (otherwise keep a draft)
+        required: true
+        default: false
+        type: boolean
 permissions:
   contents: write
 concurrency:
@@ -21,8 +26,20 @@ jobs:
         run: '[[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-qoder-tools\.[1-9][0-9]*$ ]]'
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
+      - name: Resolve reviewed release tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            git checkout --detach "$RELEASE_TAG"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$RELEASE_TAG" "$GITHUB_SHA" -m "Experimental Qoder tool-search prerelease"
+            git push origin "refs/tags/$RELEASE_TAG"
+          fi
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version-file: go.mod
@@ -33,11 +50,16 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag }}
         run: bash scripts/package-qoder-release.sh "$RELEASE_TAG"
-      - name: Create draft prerelease
+      - name: Create prerelease
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ inputs.tag }}
+          PUBLISH_RELEASE: ${{ inputs.publish }}
         run: |
+          release_args=(--prerelease --latest=false)
+          if [ "$PUBLISH_RELEASE" != "true" ]; then
+            release_args+=(--draft)
+          fi
           gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
-            --draft --prerelease --latest=false --title "Qoder Tool Search $RELEASE_TAG" \
+            "${release_args[@]}" --title "Qoder Tool Search $RELEASE_TAG" \
             --notes-file RELEASE_NOTES.md dist/*.tar.gz dist/checksums.txt
